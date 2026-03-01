@@ -9,6 +9,16 @@ fn is_t3_chat_host(host: &str) -> bool {
 }
 
 const BG_CACHE_FILE_NAME: &str = "last-bg-color.txt";
+const WINDOW_STATE_FILE_NAME: &str = "window-state.txt";
+
+#[derive(Clone, Copy, Default)]
+struct StoredWindowState {
+    zoom: Option<f64>,
+    width: Option<f64>,
+    height: Option<f64>,
+    x: Option<i32>,
+    y: Option<i32>,
+}
 
 fn color_to_rgba_css(color: tauri::window::Color) -> String {
     format!(
@@ -26,6 +36,115 @@ fn bg_cache_path<R: Runtime>(manager: &impl tauri::Manager<R>) -> Option<PathBuf
         .app_data_dir()
         .ok()
         .map(|dir| dir.join(BG_CACHE_FILE_NAME))
+}
+
+fn window_state_path<R: Runtime>(manager: &impl tauri::Manager<R>) -> Option<PathBuf> {
+    manager
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| dir.join(WINDOW_STATE_FILE_NAME))
+}
+
+fn parse_window_state(raw: &str) -> StoredWindowState {
+    let mut state = StoredWindowState::default();
+
+    for line in raw.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        match key {
+            "zoom" => state.zoom = value.parse::<f64>().ok(),
+            "width" => state.width = value.parse::<f64>().ok(),
+            "height" => state.height = value.parse::<f64>().ok(),
+            "x" => state.x = value.parse::<i32>().ok(),
+            "y" => state.y = value.parse::<i32>().ok(),
+            _ => {}
+        }
+    }
+
+    state
+}
+
+fn serialize_window_state(state: StoredWindowState) -> String {
+    let mut lines = Vec::new();
+    if let Some(zoom) = state.zoom {
+        lines.push(format!("zoom={zoom:.6}"));
+    }
+    if let Some(width) = state.width {
+        lines.push(format!("width={width:.2}"));
+    }
+    if let Some(height) = state.height {
+        lines.push(format!("height={height:.2}"));
+    }
+    if let Some(x) = state.x {
+        lines.push(format!("x={x}"));
+    }
+    if let Some(y) = state.y {
+        lines.push(format!("y={y}"));
+    }
+    lines.join("\n")
+}
+
+fn load_cached_window_state<R: Runtime>(manager: &impl tauri::Manager<R>) -> StoredWindowState {
+    let Some(path) = window_state_path(manager) else {
+        return StoredWindowState::default();
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return StoredWindowState::default();
+    };
+    parse_window_state(&raw)
+}
+
+fn save_cached_window_state<R: Runtime>(
+    manager: &impl tauri::Manager<R>,
+    state: StoredWindowState,
+) {
+    let Some(path) = window_state_path(manager) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, serialize_window_state(state));
+}
+
+fn save_cached_zoom_level<R: Runtime>(manager: &impl tauri::Manager<R>, zoom: f64) {
+    let mut state = load_cached_window_state(manager);
+    state.zoom = Some(zoom.clamp(0.5, 2.0));
+    save_cached_window_state(manager, state);
+}
+
+fn current_logical_size<R: Runtime>(window: &tauri::WebviewWindow<R>) -> Option<(f64, f64)> {
+    let size = window.inner_size().ok()?;
+    let scale_factor = window.scale_factor().ok()?;
+    let logical_size = size.to_logical::<f64>(scale_factor);
+    Some((logical_size.width, logical_size.height))
+}
+
+fn save_cached_window_size<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+    let Some((width, height)) = current_logical_size(window) else {
+        return;
+    };
+    let mut state = load_cached_window_state(window);
+    state.width = Some(width.max(1.0));
+    state.height = Some(height.max(1.0));
+    save_cached_window_state(window, state);
+}
+
+fn save_cached_window_position<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    let mut state = load_cached_window_state(window);
+    state.x = Some(position.x);
+    state.y = Some(position.y);
+    save_cached_window_state(window, state);
 }
 
 fn load_cached_bg_color<R: Runtime>(
@@ -62,8 +181,11 @@ const BG_PRELOAD_SCRIPT: &str = r#"
 "#;
 
 #[cfg(target_os = "macos")]
-fn setup_macos_app_menu<R: Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::Result<()> {
-    use std::sync::{Arc, Mutex};
+fn setup_macos_app_menu<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    zoom_level: std::sync::Arc<std::sync::Mutex<f64>>,
+) -> tauri::Result<()> {
+    use std::sync::Arc;
     use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
     use tauri::Manager;
 
@@ -163,7 +285,6 @@ fn setup_macos_app_menu<R: Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::
     )?;
 
     app_handle.set_menu(menu)?;
-    let zoom_level = Arc::new(Mutex::new(1.0_f64));
     let zoom_level_for_menu = Arc::clone(&zoom_level);
     app_handle.on_menu_event(move |app, event| {
         if let Some(window) = app.get_webview_window("main") {
@@ -188,6 +309,7 @@ fn setup_macos_app_menu<R: Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::
                             _ => {}
                         }
                         let _ = window.set_zoom(*zoom);
+                        save_cached_zoom_level(app, *zoom);
                     }
                 }
                 _ => {}
@@ -453,14 +575,43 @@ pub fn run() {
     tauri::Builder::default()
         .enable_macos_default_menu(false)
         .setup(|app| {
-            #[cfg(target_os = "macos")]
-            {
-                use tauri::Manager;
-                setup_macos_app_menu(&app.handle())?;
-                if let Some(window) = app.get_webview_window("main") {
-                    if let Some(cached) = load_cached_bg_color(&window) {
-                        let _ = window.set_background_color(Some(cached));
-                    }
+            use tauri::Manager;
+
+            if let Some(window) = app.get_webview_window("main") {
+                let persisted_state = load_cached_window_state(&window);
+                if let (Some(x), Some(y)) = (persisted_state.x, persisted_state.y) {
+                    let _ = window.set_position(tauri::Position::Physical(
+                        tauri::PhysicalPosition::new(x, y),
+                    ));
+                }
+                if let (Some(width), Some(height)) = (persisted_state.width, persisted_state.height)
+                {
+                    let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+                        width.max(1.0),
+                        height.max(1.0),
+                    )));
+                }
+
+                let zoom = persisted_state.zoom.unwrap_or(1.0).clamp(0.5, 2.0);
+                let _ = window.set_zoom(zoom);
+
+                let window_for_events = window.clone();
+                window.on_window_event(move |event| match event {
+                    tauri::WindowEvent::Resized(_) => save_cached_window_size(&window_for_events),
+                    tauri::WindowEvent::Moved(_) => save_cached_window_position(&window_for_events),
+                    _ => {}
+                });
+
+                #[cfg(target_os = "macos")]
+                if let Some(cached) = load_cached_bg_color(&window) {
+                    let _ = window.set_background_color(Some(cached));
+                }
+
+                #[cfg(target_os = "macos")]
+                {
+                    let zoom_state =
+                        std::sync::Arc::new(std::sync::Mutex::new(zoom.clamp(0.5, 2.0)));
+                    setup_macos_app_menu(&app.handle(), zoom_state)?;
                 }
             }
             Ok(())
