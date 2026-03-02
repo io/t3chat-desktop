@@ -5,7 +5,7 @@ Desktop wrapper for `https://t3.chat`.
 ## Behavior
 
 - The main window loads `https://t3.chat`.
-- Google auth and off-domain navigations are opened in your system browser.
+- Off-domain navigations are opened in your system browser, except auth.
 - The embedded webview stays focused on `t3.chat` pages.
 
 ## Scripts
