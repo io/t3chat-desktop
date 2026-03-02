@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "codesign-ls": "security find-identity -v -p codesigning",
+    "tauri": "tauri",
+    "tauri:build:dmg": "bun --env-file=.env.local tauri build --bundles dmg"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

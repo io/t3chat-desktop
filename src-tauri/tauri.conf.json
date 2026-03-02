@@ -3,7 +3,7 @@
   "productName": "T3.chat",
   "mainBinaryName": "T3.chat",
   "version": "0.1.0",
-  "identifier": "net.fannar.t3chatdesktop",
+  "identifier": "is.io.chat3",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
